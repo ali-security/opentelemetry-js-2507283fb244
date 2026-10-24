@@ -1,16 +1,18 @@
 name: Unit Tests
 on:
-  push:
-    branches:
-      - main
-  pull_request:
-  merge_group:
+  workflow_dispatch:
+    inputs:
+      test-filter:
+        description: 'Extra nx run-many arguments to scope the tests (e.g. --projects=@opentelemetry/core); empty runs the full suite'
+        required: false
+        default: ''
 
 permissions:
   contents: read
 
 jobs:
   node-tests:
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
@@ -43,29 +45,44 @@ jobs:
           matrix.node_version == '18' ||
           matrix.node_version == '20.6.0'
           }}
-      - run: npm install -g npm@latest
-        if: ${{
-          matrix.node_version == '20' ||
-          matrix.node_version == '22' ||
-          matrix.node_version == '24' ||
-          matrix.node_version == '25'
-          }}
-
       - name: Bootstrap
         run: npm ci --ignore-scripts
 
       - name: Build 🔧
         run: npm run compile
 
-      - run: npm test
+      - name: Unit tests
+        shell: bash
+        run: |
+          # Redirect to a file instead of piping: nx's final output (last task's
+          # log + run summary) is intermittently lost when written to a pipe at exit.
+          trap 'cat seal-test.log' EXIT
+          npm test -- ${{ inputs.test-filter }} > seal-test.log 2>&1
 
-      - name: Report Coverage
-        uses: codecov/codecov-action@1af58845a975a7985b0beb0cbe6fbbb71a41dbad # v5
-        env:
-          CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
+      - name: Test summary
+        shell: bash
+        run: |
+          sed -e 's/\x1b\[[0-9;]*m//g' seal-test.log > seal-test.clean.log
+          awk '/^[[:space:]]*[0-9]+ passing/{p+=$1; n++} /^[[:space:]]*[0-9]+ failing/{f+=$1} /^[[:space:]]*[0-9]+ pending/{q+=$1} END{printf "Mocha totals across %d test runs: %d passing, %d failing, %d pending\n", n, p, f, q}' seal-test.clean.log
+          awk '/nx run @opentelemetry\/core:test/{c=1} c && /^[[:space:]]*[0-9]+ passing/{print "@opentelemetry/core: " $1 " passing"; exit}' seal-test.clean.log
+          grep -E 'Successfully ran target test' seal-test.clean.log
+
+      - name: Pack @opentelemetry/core
+        if: ${{ matrix.node_version == '22' }}
+        run: |
+          mkdir -p ./seal-dist
+          npm pack --workspace=packages/opentelemetry-core --pack-destination=./seal-dist
+          mv ./seal-dist/opentelemetry-core-2.6.1.tgz ./seal-dist/core-2.6.1.tgz
+
+      - name: Upload @opentelemetry/core tarball
+        if: ${{ matrix.node_version == '22' }}
+        uses: actions/upload-artifact@v4
         with:
-          verbose: true
+          name: core-2.6.1
+          path: seal-dist/core-2.6.1.tgz
+          if-no-files-found: error
   node-windows-tests:
+    timeout-minutes: 45
     runs-on: windows-latest
     steps:
       - name: Checkout
@@ -78,8 +95,6 @@ jobs:
             package-lock.json
           node-version: '22'
 
-      - run: npm install -g npm@latest
-
       - name: Bootstrap
         run: npm ci --ignore-scripts
 
@@ -89,8 +104,22 @@ jobs:
           npm run compile
 
       - name: Unit tests
-        run: npm run test
+        shell: bash
+        run: |
+          # Redirect to a file instead of piping: nx's final output (last task's
+          # log + run summary) is intermittently lost when written to a pipe at exit.
+          trap 'cat seal-test.log' EXIT
+          npm run test -- ${{ inputs.test-filter }} > seal-test.log 2>&1
+
+      - name: Test summary
+        shell: bash
+        run: |
+          sed -e 's/\x1b\[[0-9;]*m//g' seal-test.log > seal-test.clean.log
+          awk '/^[[:space:]]*[0-9]+ passing/{p+=$1; n++} /^[[:space:]]*[0-9]+ failing/{f+=$1} /^[[:space:]]*[0-9]+ pending/{q+=$1} END{printf "Mocha totals across %d test runs: %d passing, %d failing, %d pending\n", n, p, f, q}' seal-test.clean.log
+          awk '/nx run @opentelemetry\/core:test/{c=1} c && /^[[:space:]]*[0-9]+ passing/{print "@opentelemetry/core: " $1 " passing"; exit}' seal-test.clean.log
+          grep -E 'Successfully ran target test' seal-test.clean.log
   browser-tests:
+    timeout-minutes: 45
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -110,14 +139,9 @@ jobs:
         run: npm run compile
 
       - name: Unit tests
-        run: npm run test:browser
-      - name: Report Coverage
-        uses: codecov/codecov-action@1af58845a975a7985b0beb0cbe6fbbb71a41dbad # v5
-        env:
-          CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
-        with:
-          verbose: true
+        run: npm run test:browser -- ${{ inputs.test-filter }}
   webworker-tests:
+    timeout-minutes: 45
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -136,10 +160,4 @@ jobs:
         run: npm run compile
 
       - name: Unit tests
-        run: npm run test:webworker
-      - name: Report Coverage
-        uses: codecov/codecov-action@1af58845a975a7985b0beb0cbe6fbbb71a41dbad # v5
-        env:
-          CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
-        with:
-          verbose: true
+        run: npm run test:webworker -- ${{ inputs.test-filter }}
